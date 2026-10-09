@@ -1,11 +1,69 @@
 services:
+  db:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Run php db/setup.php first}
+      MYSQL_ROOT_HOST: "%"
+    volumes: ["mysql_data:/var/lib/mysql"]
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+  init:
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+    command: ["php", "/var/www/db/docker-init.php"]
+    environment:
+      DB_HOST: db
+      DB_NAME: ${DB_NAME:-trustrate}
+      DB_USER: ${DB_USER:-trustrate_app}
+      DB_PASSWORD: ${DB_PASSWORD:?Run setup}
+      DB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Run setup}
+      DB_READONLY_USER: ${DB_READONLY_USER:-trustrate_reader}
+      DB_READONLY_PASSWORD: ${DB_READONLY_PASSWORD:?Run setup}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@trustrate.local}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Run setup}
+      IP_HASH_KEY: ${IP_HASH_KEY:?Run setup}
+    depends_on:
+      db: {condition: service_healthy}
   api:
     build: .
-    ports: ["8000:8000"]
-    env_file: [.env]
+    environment:
+      DB_HOST: db
+      DB_NAME: ${DB_NAME:-trustrate}
+      DB_USER: ${DB_READONLY_USER:-trustrate_reader}
+      DB_PASSWORD: ${DB_READONLY_PASSWORD:?Run setup}
+      SCORING_API_KEY: ${SCORING_API_KEY:?Run setup}
+    expose: ["8000"]
+    depends_on:
+      init: {condition: service_completed_successfully}
   web:
-    image: python:3.11-slim
-    working_dir: /web
-    volumes: ["./web:/web:ro"]
-    command: python -m http.server 4173 --bind 0.0.0.0
-    ports: ["4173:4173"]
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+    environment: &app_env
+      DB_HOST: db
+      DB_NAME: ${DB_NAME:-trustrate}
+      DB_USER: ${DB_USER:-trustrate_app}
+      DB_PASSWORD: ${DB_PASSWORD:?Run setup}
+      IP_HASH_KEY: ${IP_HASH_KEY:?Run setup}
+      SCORING_URL: http://api:8000
+      SCORING_API_KEY: ${SCORING_API_KEY:?Run setup}
+      COOKIE_SECURE: ${COOKIE_SECURE:-0}
+    ports: ["127.0.0.1:4173:80"]
+    depends_on:
+      init: {condition: service_completed_successfully}
+  worker:
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+    environment: *app_env
+    command: ["php", "/var/www/db/score-worker.php"]
+    restart: on-failure
+    depends_on:
+      init: {condition: service_completed_successfully}
+      api: {condition: service_started}
+volumes:
+  mysql_data:

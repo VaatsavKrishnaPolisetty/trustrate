@@ -1,6 +1,6 @@
 """TrustRate demo API: hybrid classical + Qiskit anomaly detection."""
 from datetime import datetime, timezone
-import hashlib, os, random, uuid
+import hashlib, os, random, uuid, json
 from typing import Literal, Optional
 
 import numpy as np
@@ -9,6 +9,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sklearn.ensemble import IsolationForest
 from sklearn.svm import OneClassSVM
+try:
+    import pymysql
+except ImportError:
+    pymysql = None
 
 app = FastAPI(title="TrustRate Quantum Trust API", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -49,6 +53,24 @@ def score(r):
     if not reasons: reasons.append({"code":"NORMAL_PATTERN","label":"Normal pattern","detail":"No elevated coordination signals"})
     return {"classical_score":round(classical,3),"quantum_score":round(quantum,3),"hybrid_score":hybrid,"label":label,"reasons":reasons,"backend":"aer_simulator","model_version":"qocsvm-demo-1.0"}
 
+def db_connection():
+    """Read-only MySQL connection; local seeded memory data remains an explicit offline fallback."""
+    if not pymysql or not os.getenv("DB_READONLY_HOST"):
+        return None
+    return pymysql.connect(host=os.getenv("DB_READONLY_HOST","mysql"), port=int(os.getenv("DB_READONLY_PORT","3306")), user=os.getenv("DB_READONLY_USER"), password=os.getenv("DB_READONLY_PASSWORD"), database=os.getenv("DB_NAME","trustrate"), cursorclass=pymysql.cursors.DictCursor, connect_timeout=3)
+
+def database_review(review_id):
+    conn=db_connection()
+    if not conn: return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT r.id,r.product_id,r.user_id,r.rating,r.title,r.body,r.ip_hash,r.created_at,r.revision,u.created_at AS account_created FROM reviews r JOIN users u ON u.id=r.user_id WHERE r.id=%s",(review_id,))
+            row=cur.fetchone()
+        if not row: return None
+        row["ip"]=row.pop("ip_hash"); row["ua"]="unknown"; row["user"]=str(row["user_id"]); row["status"]="published"; row["body"]=row["body"]
+        return row
+    finally: conn.close()
+
 class ReviewIn(BaseModel):
     rating: int = Field(ge=1, le=5)
     body: str = Field(min_length=10, max_length=1000)
@@ -63,6 +85,15 @@ def product():
     raw = sum(r["rating"] for r,s in scored)/len(scored)
     genuine = sum(r["rating"] for r in visible)/len(visible)
     return {"product":PRODUCT,"raw_rating":round(raw,2),"genuine_rating":round(genuine,2),"excluded":len(scored)-len(visible),"reviews":[{**r,"score":score(r)} for r in reviews[-12:]]}
+
+@app.post("/v1/score")
+def score_review(payload: dict, x_api_key: Optional[str]=Header(default=None)):
+    auth(x_api_key)
+    review_id=int(payload.get("review_id",0)); r=database_review(review_id)
+    if r is None: r=next((x for x in reviews if x["id"]==review_id),None)
+    if r is None: raise HTTPException(404,"Review not found")
+    result=score(r); result.update({"review_id":review_id,"review_revision":int(r.get("revision",payload.get("review_revision",1)))})
+    return result
 
 @app.get("/v1/admin/summary")
 def summary(x_api_key: Optional[str]=Header(default=None)): 
@@ -102,4 +133,4 @@ def hardware_run(x_api_key: Optional[str]=Header(default=None)):
 
 @app.get("/v1/models")
 def models():
-    return {"model_version":"qocsvm-demo-1.0","n_qubits":6,"feature_map":"ZZFeatureMap(reps=2, entanglement='linear')","quantum_kernel":"FidelityQuantumKernel","backend":"AerSimulator (IBM mode available)","metrics":[{"name":"Isolation Forest","f1":0.81,"recall":0.78,"runtime":"42 ms"},{"name":"Classical OCSVM","f1":0.76,"recall":0.72,"runtime":"31 ms"},{"name":"Quantum OCSVM (Aer)","f1":0.79,"recall":0.75,"runtime":"640 ms"},{"name":"Hybrid fusion","f1":0.86,"recall":0.84,"runtime":"710 ms"}]}
+    return {"model_version":"qocsvm-demo-1.0","n_qubits":6,"feature_map":"ZZFeatureMap(reps=2, entanglement='linear')","quantum_kernel":"FidelityQuantumKernel","backend":"AerSimulator (IBM mode available)","metrics":[],"metrics_status":"Run pipeline.cli evaluate to populate measured metrics; no fabricated benchmark values are returned."}
