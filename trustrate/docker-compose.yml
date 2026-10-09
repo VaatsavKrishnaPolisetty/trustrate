@@ -33,9 +33,11 @@ services:
     environment:
       DB_HOST: db
       DB_NAME: ${DB_NAME:-trustrate}
-      DB_USER: ${DB_READONLY_USER:-trustrate_reader}
-      DB_PASSWORD: ${DB_READONLY_PASSWORD:?Run setup}
+      DB_READONLY_USER: ${DB_READONLY_USER:-trustrate_reader}
+      DB_READONLY_PASSWORD: ${DB_READONLY_PASSWORD:?Run setup}
       SCORING_API_KEY: ${SCORING_API_KEY:?Run setup}
+      MODEL_ARTIFACT_DIR: /app/service/artifacts
+    volumes: ["./service/artifacts:/app/service/artifacts:ro"]
     expose: ["8000"]
     depends_on:
       init: {condition: service_completed_successfully}
@@ -52,6 +54,9 @@ services:
       SCORING_URL: http://api:8000
       SCORING_API_KEY: ${SCORING_API_KEY:?Run setup}
       COOKIE_SECURE: ${COOKIE_SECURE:-0}
+      DEMO_MODE: ${DEMO_MODE:-0}
+      MODEL_ARTIFACT_DIR: /var/www/service/artifacts
+    volumes: ["./service/artifacts:/var/www/service/artifacts:ro", "./data:/var/www/data:ro"]
     ports: ["127.0.0.1:4173:80"]
     depends_on:
       init: {condition: service_completed_successfully}

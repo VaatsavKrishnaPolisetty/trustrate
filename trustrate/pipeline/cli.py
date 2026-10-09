@@ -1,20 +1,52 @@
-import argparse, json
-from .data import synthetic_reviews, load_reviews, write_jsonl, import_public
-from .features import extract_features
+"""Download/build/train/evaluate commands. Evaluation never trains or saves a model."""
+import argparse
+import json
+from pathlib import Path
+
+from .data import download_public, load_reviews, make_dataset, write_jsonl
 from .models import TrustRateModel
-from .validation import calibrate, evaluate
+from .validation import evaluate_model
+
 
 def main():
-    p=argparse.ArgumentParser(); sub=p.add_subparsers(dest="cmd", required=True)
-    d=sub.add_parser("data"); d.add_argument("--out",default="data/reviews.jsonl"); d.add_argument("--seed",type=int,default=42)
-    i=sub.add_parser("import"); i.add_argument("source"); i.add_argument("--out",required=True); i.add_argument("--provenance",default="data/provenance.json"); i.add_argument("--license",default="unspecified")
-    t=sub.add_parser("train"); t.add_argument("--input",default="data/reviews.jsonl"); t.add_argument("--artifact",default="artifacts/model.joblib"); t.add_argument("--quantum",action="store_true")
-    e=sub.add_parser("evaluate"); e.add_argument("--input",default="data/reviews.jsonl"); e.add_argument("--artifact",default="artifacts/model.joblib")
-    a=p.parse_args()
-    if a.cmd=="data": write_jsonl(synthetic_reviews(seed=a.seed),a.out); return
-    if a.cmd=="import": print(json.dumps(import_public(a.source,a.out,a.provenance,a.license),indent=2)); return
-    rows=load_reviews(a.input); X=extract_features(rows); y=[int(r.get("label",0)) for r in rows]
-    m=TrustRateModel(getattr(a,"quantum",False)).fit(X,y); m.save(a.artifact)
-    if a.cmd=="evaluate":
-        s=m.scores(X)["hybrid"]; c=calibrate(s,y); print(json.dumps({**evaluate(s,y,c["threshold"]),**c},indent=2))
-if __name__=="__main__": main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    for command in ("data", "build", "train", "evaluate"):
+        p = sub.add_parser(command)
+        p.add_argument("--input", default="data/reviews.jsonl")
+        p.add_argument("--artifact", default="service/artifacts/model.joblib")
+        p.add_argument("--metrics", default="service/artifacts/metrics.json")
+        p.add_argument("--seed", type=int, default=42)
+        p.add_argument("--qubits", type=int, choices=(4, 6), default=4)
+        p.add_argument("--n-train", type=int, default=24)
+    args = parser.parse_args()
+    provenance_path = Path(args.input).parent / "provenance.json"
+    if args.command in ("data", "build"):
+        sources, provenance = download_public(Path(args.input).parent)
+        rows = make_dataset(sources, args.seed)
+        write_jsonl(rows, args.input)
+        print(f"Generated {len(rows)} rows from 1000 real Amazon sentences; synthetic behavior labels", flush=True)
+        if args.command == "data":
+            return
+    else:
+        rows = load_reviews(args.input)
+        provenance = json.loads(provenance_path.read_text()) if provenance_path.exists() else {}
+    if args.command in ("train", "build"):
+        print("Fitting genuine-only transforms and explicit Aer quantum kernel...", flush=True)
+        model = TrustRateModel(args.qubits, args.n_train, args.seed).fit(rows, provenance)
+        model.save(args.artifact)
+        print(f"Saved {args.artifact}: {model.model_version}", flush=True)
+        if args.command == "train":
+            return
+    # Deliberately load even after build, exercising the actual serving artifact.
+    model = TrustRateModel.load(args.artifact)
+    metrics = evaluate_model(model, rows)
+    path = Path(args.metrics)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(metrics, indent=2, allow_nan=False) + "\n")
+    print(json.dumps({"artifact": args.artifact, "metrics": args.metrics,
+                      "models": metrics["models"], "scenarios": metrics["scenarios"]}, indent=2))
+
+
+if __name__ == "__main__":
+    main()

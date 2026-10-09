@@ -13,7 +13,8 @@ function scorePending(): bool {
         $url=rtrim(envv('SCORING_URL','http://127.0.0.1:8000'),'/').'/v1/score';
         $curl=curl_init($url);
         curl_setopt_array($curl,[CURLOPT_POST=>true,CURLOPT_POSTFIELDS=>json_encode(['review_id'=>(int)$job['review_id']],JSON_THROW_ON_ERROR),CURLOPT_HTTPHEADER=>['Content-Type: application/json','X-API-Key: '.envv('SCORING_API_KEY')],CURLOPT_RETURNTRANSFER=>true,CURLOPT_CONNECTTIMEOUT=>5,CURLOPT_TIMEOUT=>90,CURLOPT_FOLLOWLOCATION=>false]);
-        $body=curl_exec($curl); $code=curl_getinfo($curl,CURLINFO_HTTP_CODE); curl_close($curl);
+        $body=curl_exec($curl); $code=curl_getinfo($curl,CURLINFO_HTTP_CODE); unset($curl);
+        if($code===429) { sleep(60); throw new RuntimeException('Scoring rate limited'); }
         if($body===false||$code!==200) throw new RuntimeException('Scoring service unavailable');
         $result=json_decode($body,true,64,JSON_THROW_ON_ERROR);
         if(!is_array($result)) throw new RuntimeException('Invalid scoring response');
@@ -21,12 +22,18 @@ function scorePending(): bool {
         foreach(['classical_score','quantum_score','hybrid_score'] as $key) if(!isset($result[$key])||!is_numeric($result[$key])||!is_finite((float)$result[$key])||(float)$result[$key]<0||(float)$result[$key]>1) throw new RuntimeException('Invalid score range');
         if(!in_array($result['label']??null,['genuine','suspicious','uncertain','watch'],true)||!is_array($result['reasons']??null)) throw new RuntimeException('Invalid score metadata');
         foreach(['backend','model_version'] as $key) if(!is_string($result[$key]??null)||$result[$key]===''||strlen($result[$key])>100) throw new RuntimeException('Invalid model metadata');
+        $receipt=$result['ibm_job_id']??null;
+        if($receipt!==null&&(!is_string($receipt)||strlen($receipt)>255)) throw new RuntimeException('Invalid receipt');
         db()->beginTransaction();
         // All writers lock the review before its queue entry: edits cannot install stale scores.
         $review=query('SELECT revision,status FROM reviews WHERE id=? FOR UPDATE',[$job['review_id']])->fetch();
         $current=query('SELECT revision FROM scoring_queue WHERE review_id=? FOR UPDATE',[$job['review_id']])->fetch();
         if($review&&$current&&$review['status']!=='deleted'&&(int)$review['revision']===(int)$job['revision']&&(int)$current['revision']===(int)$job['revision']) {
             query('INSERT INTO review_scores(review_id,review_revision,classical_score,quantum_score,hybrid_score,label,reasons,backend,model_version) VALUES (?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE review_revision=VALUES(review_revision),classical_score=VALUES(classical_score),quantum_score=VALUES(quantum_score),hybrid_score=VALUES(hybrid_score),label=VALUES(label),reasons=VALUES(reasons),backend=VALUES(backend),model_version=VALUES(model_version),scored_at=CURRENT_TIMESTAMP',[$job['review_id'],$job['revision'],$result['classical_score'],$result['quantum_score'],$result['hybrid_score'],$result['label'],json_encode($result['reasons'],JSON_THROW_ON_ERROR),$result['backend'],$result['model_version']]);
+            query('UPDATE review_scores SET ibm_job_id=? WHERE review_id=?',[$receipt,$job['review_id']]);
+            // Administrative decisions survive late results. A model watch is published;
+            // administrative watch is an explicit Genuine exclusion until restoration.
+            query("UPDATE reviews SET status=? WHERE id=? AND status='pending_score'",[in_array($result['label'],['genuine','watch'],true)?'published':'flagged',$job['review_id']]);
             query('DELETE FROM scoring_queue WHERE review_id=? AND revision=?',[$job['review_id'],$job['revision']]);
         }
         db()->commit();

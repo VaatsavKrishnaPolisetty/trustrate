@@ -1,0 +1,10 @@
+.env
+.env.*
+.venv
+.runtime
+db/.local
+data
+service/artifacts
+**/__pycache__
+**/*.pyc
+.git

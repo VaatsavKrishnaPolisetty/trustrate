@@ -5,5 +5,8 @@
 __pycache__/
 *.pyc
 .DS_Store
+data/
+.runtime/
+*.joblib
 service/artifacts/*
 !service/artifacts/.gitkeep
