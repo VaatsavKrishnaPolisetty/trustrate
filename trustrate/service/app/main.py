@@ -60,7 +60,7 @@ def health(): return {"status":"ok", "model_loaded":True, "active_backend":"aer_
 def product():
     scored = [(r, score(r)) for r in reviews if r["status"] != "removed"]
     visible = [r for r,s in scored if r["status"] in ("published","restored") or s["label"] != "suspicious"]
-    raw = sum(r["rating"] for r in scored)/len(scored)
+    raw = sum(r["rating"] for r,s in scored)/len(scored)
     genuine = sum(r["rating"] for r in visible)/len(visible)
     return {"product":PRODUCT,"raw_rating":round(raw,2),"genuine_rating":round(genuine,2),"excluded":len(scored)-len(visible),"reviews":[{**r,"score":score(r)} for r in reviews[-12:]]}
 
