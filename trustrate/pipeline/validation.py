@@ -28,20 +28,40 @@ def fuse_scores(scores, quantum_weight):
     return (1 - quantum_weight) * classical_mean + quantum_weight * scores["quantum_ocsvm"]
 
 
-def select_fusion(validation_scores, validation_labels):
-    """Fixed, nonzero grid; maximize validation recall at genuine FPR <= 5%."""
+def guarded_score(fused, guard):
+    """Explicit operational layer, separate from the unguarded novelty score."""
+    return np.where(guard, .5 + .5 * fused, .49 * fused)
+
+
+def constrained_calibrate(scores, labels, slices=(), max_fpr=.025, floor=None):
+    result = calibrate(scores, labels, max_fpr)
+    threshold = result["threshold"]
+    for mask in slices:
+        if np.any(np.asarray(mask) & (np.asarray(labels) == 0)):
+            threshold = max(threshold, calibrate(np.asarray(scores)[mask], np.asarray(labels)[mask], .05)["threshold"])
+    if floor is not None:
+        threshold = max(threshold, floor)
+    result.update(threshold=float(threshold), false_positive_rate=float(np.mean(np.asarray(scores)[np.asarray(labels) == 0] > threshold)))
+    result["slice_false_positive_rates"] = [float(np.mean(np.asarray(scores)[np.asarray(mask) & (np.asarray(labels) == 0)] > threshold)) for mask in slices]
+    return result
+
+
+def select_fusion(validation_scores, validation_labels, guard=None, slices=()):
+    """Four predeclared candidates, selected solely using validation labels."""
     labels = np.asarray(validation_labels)
     attacks = labels == 1
     candidates = []
     for weight in (.1, .25, .5, .75):
         fused = fuse_scores(validation_scores, weight)
-        calibration = calibrate(fused, labels)
+        if guard is not None:
+            fused = guarded_score(fused, guard)
+        calibration = constrained_calibrate(fused, labels, slices, floor=.5 if guard is not None else None)
         recall = float(np.mean(fused[attacks] > calibration["threshold"])) if attacks.any() else 0.0
         candidates.append({"quantum_weight": weight, "validation_recall": recall, **calibration})
     chosen = min(candidates, key=lambda c: (-c["validation_recall"], abs(c["quantum_weight"] - .5), c["quantum_weight"]))
     return {"chosen_quantum_weight": chosen["quantum_weight"], "candidates": candidates,
             "selection_split": "validation", "attack_count": int(attacks.sum()),
-            "rule": "Maximum validation attack recall at <=5% genuine FPR; ties prefer 0.5, then nearest to 0.5, then lower weight"}
+            "rule": "Maximum validation recall at aggregate FPR <=2.5% and genuine N1/N2 slice FPR <=5%; ties prefer 0.5 then nearest then lower"}
 
 
 def evaluate(scores, labels, threshold):

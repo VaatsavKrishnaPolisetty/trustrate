@@ -7,6 +7,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 from sklearn.decomposition import PCA
+from sklearn.cluster import KMeans
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from sklearn.svm import OneClassSVM
@@ -14,7 +15,23 @@ from sklearn.svm import OneClassSVM
 from .data import assert_split_integrity
 from .features import FEATURE_NAMES, REASON_DETAILS, FeatureExtractor, preprocess_features
 from .quantum import fit_quantum, make_kernel, support_decision
-from .validation import calibrate, ecdf, fuse_scores, select_fusion
+from .validation import calibrate, constrained_calibrate, ecdf, fuse_scores, guarded_score, select_fusion, evaluate
+
+
+def select_normal_support(Z, count, seed=42):
+    """Round-robin cluster strata cover rare normal modes, without row metadata."""
+    clustering = KMeans(n_clusters=8, random_state=seed, n_init=10).fit(Z)
+    pools = []
+    for cluster in range(8):
+        members = np.flatnonzero(clustering.labels_ == cluster)
+        distance = np.sum((Z[members] - clustering.cluster_centers_[cluster]) ** 2, axis=1)
+        pools.append(list(members[np.argsort(distance, kind="stable")]))
+    chosen = []
+    while len(chosen) < count:
+        for pool in pools:
+            if pool and len(chosen) < count:
+                chosen.append(pool.pop(0))
+    return np.sort(chosen)
 
 
 class TrustRateModel:
@@ -47,10 +64,11 @@ class TrustRateModel:
         self.angle_scaler = MinMaxScaler(feature_range=(0, np.pi), clip=True).fit(P)
         angles = self.angle_scaler.transform(P)
         self.isolation_forest = IsolationForest(n_estimators=150, random_state=self.seed, n_jobs=1).fit(Z)
-        # Identical points and angle inputs isolate the kernel comparison.
-        selected = np.sort(np.random.default_rng(self.seed).choice(len(X), self.n_train, replace=False))
+        selected = select_normal_support(Z, self.n_train, self.seed)
         self.quantum_train = angles[selected].copy()
-        self.classical_ocsvm = OneClassSVM(kernel="rbf", gamma="scale", nu=.1).fit(self.quantum_train)
+        self.classical_ocsvm = OneClassSVM(kernel="rbf", gamma="scale", nu=.025).fit(Z)
+        self.guard_upper = np.quantile(X, .99, axis=0)
+        self.guard_age_lower = float(np.quantile(X[:, 8], .01))
         self._kernel, self.quantum_ocsvm = fit_quantum(self.quantum_train, self.seed)
         self.quantum_support = self.quantum_train[self.quantum_ocsvm.support_].copy()
         self.quantum_dual = self.quantum_ocsvm.dual_coef_.ravel().copy()
@@ -63,31 +81,42 @@ class TrustRateModel:
         self.ecdf_references = {name: np.sort(values[normal_validation]) for name, values in raw.items()}
         labels = np.array([r["true_label"] for r in validation])
         components = {name: ecdf(self.ecdf_references[name], values) for name, values in raw.items()}
-        fusion_selection = select_fusion(components, labels)
+        slices = [np.array([r["scenario"] == name for r in validation]) for name in ("N1", "N2")]
+        fusion_selection = select_fusion(components, labels, self.operational_guard(V), slices)
         self.quantum_weight = fusion_selection["chosen_quantum_weight"]
         calibrated = self._normalize(raw)
-        calibration = {name: calibrate(value, labels) for name, value in calibrated.items()}
+        calibrated["hybrid_unguarded"] = calibrated["hybrid"].copy()
+        calibrated["hybrid"] = guarded_score(calibrated["hybrid"], self.operational_guard(V))
+        calibration = {name: constrained_calibrate(value, labels, slices, floor=.5 if name == "hybrid" else None) for name, value in calibrated.items()}
         self.thresholds = {name: result["threshold"] for name, result in calibration.items()}
         watch_calibration = {name: calibrate(value, labels, max_fpr=.2) for name, value in calibrated.items()}
         self.watch_thresholds = {name: result["threshold"] for name, result in watch_calibration.items()}
         fingerprint = hashlib.sha256(json.dumps({"train": train, "validation": validation,
                                                  "seed": self.seed, "qubits": self.qubits,
-                                                 "n_train": self.n_train, "pipeline_version": 2,
+                                                  "n_train": self.n_train, "pipeline_version": 3,
                                                  "quantum_weight": self.quantum_weight}, sort_keys=True).encode()).hexdigest()
-        self.model_version = f"trustrate-uci-v2-{fingerprint[:12]}"
+        self.model_version = f"trustrate-uci-v3-{fingerprint[:12]}"
         self.metadata = {
             "model_version": self.model_version, "backend": self.backend,
             "simulator": "qiskit_aer.primitives.Sampler(method=statevector, shots=None)",
             "quantum_fidelity": "ComputeUncompute + FidelityQuantumKernel",
             "qubits": self.qubits, "quantum_train_count": len(self.quantum_train),
-            "quantum_support_count": len(self.quantum_support), "classical_ocsvm_train_count": len(selected),
+            "quantum_support_count": len(self.quantum_support), "classical_ocsvm_train_count": len(X),
+            "support_selection": "genuine-training standardized-feature KMeans(8), deterministic nearest-centroid round-robin strata",
             "genuine_train_count": len(genuine), "genuine_validation_count": int(normal_validation.sum()),
             "quantum_train_ids": [genuine[i]["id"] for i in selected],
             "feature_names": FEATURE_NAMES, "seed": self.seed, "calibration": calibration,
             "threshold": self.thresholds["hybrid"], "watch_threshold": self.watch_thresholds["hybrid"],
             "watch_thresholds": self.watch_thresholds, "watch_calibration": watch_calibration,
             "quantum_weight": self.quantum_weight, "fusion_selection": fusion_selection,
-            "hybrid_formula": f"{1 - self.quantum_weight:g} * mean(IF, classical_OCSVM) + {self.quantum_weight:g} * quantum_OCSVM",
+            "hybrid_formula": "guard ? 0.5 + 0.5 * hybrid_unguarded : 0.49 * hybrid_unguarded",
+            "unguarded_formula": f"{1 - self.quantum_weight:g} * mean(IF, classical_OCSVM) + {self.quantum_weight:g} * quantum_OCSVM",
+            "operational_guard": {"fit_split": "genuine train", "upper_quantile": .99, "age_lower_quantile": .01,
+                                  "upper_tails": self.guard_upper.tolist(), "age_lower_tail": self.guard_age_lower,
+                                  "rule": "At least two independent groups: coordination (F1-F5), identity (low F9 or high F10), content (high F6 or F7 or abs F8)"},
+            "dataset_methodology": "v3 corrected A1-A4 definitions; source-group-disjoint synthetic behaviors; not an apples-to-apples comparison with v2",
+            "validation_metrics": {name: evaluate(value, labels, self.thresholds[name]) for name, value in calibrated.items()},
+            "validation_scenarios": {scenario: evaluate(calibrated["hybrid"][mask], labels[mask], self.thresholds["hybrid"]) for scenario in sorted(set(r["scenario"] for r in validation)) for mask in [np.array([r["scenario"] == scenario for r in validation])]},
             "preprocessing": "log1p(F1–F5), then genuine-training StandardScaler; F6–F10 unchanged before scaling",
             "reason_code_map": {code: description for code, description in REASON_DETAILS.values()},
             "pca_explained_variance": self.pca.explained_variance_ratio_.tolist(),
@@ -111,7 +140,7 @@ class TrustRateModel:
             self._kernel = make_kernel(self.qubits, self.seed)
         return {
             "isolation_forest": -self.isolation_forest.decision_function(Z),
-            "classical_ocsvm": -self.classical_ocsvm.decision_function(angles),
+            "classical_ocsvm": -self.classical_ocsvm.decision_function(Z if hasattr(self, "guard_upper") else angles),
             "quantum_ocsvm": -support_decision(self._kernel, angles, self.quantum_support,
                                                self.quantum_dual, self.quantum_intercept),
         }
@@ -123,7 +152,19 @@ class TrustRateModel:
 
     def scores(self, X):
         """Frozen ECDF normalization: no per-request or per-batch fitting."""
-        return self._normalize(self.raw_scores(X))
+        result = self._normalize(self.raw_scores(X))
+        if hasattr(self, "guard_upper"):
+            result["hybrid_unguarded"] = result["hybrid"].copy()
+            result["hybrid"] = guarded_score(result["hybrid"], self.operational_guard(X))
+        return result
+
+    def operational_guard(self, X):
+        """Feature-only two-signal evidence; never consult IDs/scenarios/labels."""
+        high = X > self.guard_upper
+        coordination = high[:, :5].any(axis=1)
+        identity = (X[:, 8] < self.guard_age_lower) | high[:, 9]
+        content = high[:, 5] | high[:, 6] | (np.abs(X[:, 7]) > max(abs(self.guard_upper[7]), 3))
+        return coordination.astype(int) + identity.astype(int) + content.astype(int) >= 2
 
     def score_review(self, review: dict, history: list[dict]):
         X = self.features.transform([review], history=history)

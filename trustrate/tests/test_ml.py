@@ -5,6 +5,7 @@ There is no mocked or synthetic replacement for the Aer scoring backend.
 """
 from copy import deepcopy
 import hashlib
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -14,7 +15,7 @@ import numpy as np
 
 from pipeline.data import assert_split_integrity, load_reviews, text_group
 from pipeline.features import FEATURE_NAMES, REASON_DETAILS, FeatureExtractor, preprocess_features, validate_review
-from pipeline.models import TrustRateModel
+from pipeline.models import TrustRateModel, select_normal_support
 from pipeline.quantum import make_kernel, support_decision
 from pipeline.validation import calibrate, ecdf, evaluate_model, select_fusion
 
@@ -135,6 +136,16 @@ class FeatureTests(unittest.TestCase):
         self.assertEqual(calibration["comparison"], ">")
         self.assertLessEqual(calibrate(np.arange(101), np.zeros(101))["false_positive_rate"], .05)
 
+    def test_deterministic_support_represents_rare_normal_modes(self):
+        rng = np.random.default_rng(7)
+        ordinary = rng.normal(0, .1, (200, 10))
+        rare = rng.normal(10, .1, (8, 10))
+        features = np.vstack([ordinary, rare])
+        selected = select_normal_support(features, 24)
+        np.testing.assert_array_equal(selected, select_normal_support(features, 24))
+        self.assertEqual(len(set(selected)), 24)
+        self.assertTrue(np.any(selected >= len(ordinary)))
+
 
 class RealArtifactTests(unittest.TestCase):
     @classmethod
@@ -174,6 +185,62 @@ class RealArtifactTests(unittest.TestCase):
         actual = support_decision(kernel, angles, self.model.quantum_support,
                                   self.model.quantum_dual, self.model.quantum_intercept)
         np.testing.assert_allclose(actual, expected, atol=1e-9, rtol=1e-9)
+
+    def test_v3_scenario_semantics_and_baseline_immutable(self):
+        for split in ("train", "validation", "test"):
+            rows = [r for r in self.rows if r["split"] == split]
+            self.assertTrue(all(r["id"].startswith(f"v3-{split}-") for r in rows))
+            attacks = {name: [r for r in rows if r["scenario"] == name] for name in ("A1", "A2", "A3", "A4")}
+            self.assertTrue(30 <= len(attacks["A1"]) <= 60)
+            self.assertEqual(len({r["ip_hash"] for r in attacks["A1"]}), 5)
+            self.assertLess(max(r["created_at"] for r in attacks["A1"]) - min(r["created_at"] for r in attacks["A1"]), 1200)
+            self.assertEqual({r["rating"] for r in attacks["A2"]}, {1})
+            self.assertLessEqual(len({r["ip_hash"] for r in attacks["A2"]}), 3)
+            self.assertEqual(len({r["body"] for r in attacks["A3"]}), len(attacks["A3"]))
+            self.assertTrue(all(b["created_at"] - a["created_at"] >= 86400 for a, b in zip(attacks["A3"], attacks["A3"][1:])))
+            self.assertEqual(len({r["user_id"] for r in attacks["A4"]}), len(attacks["A4"]))
+            self.assertEqual(len({r["ip_prefix"] for r in attacks["A4"]}), 1)
+            self.assertTrue(all(r["created_at"] - r["account_created"] <= 3600 for r in attacks["A4"]))
+        baseline = ROOT / "service/artifacts/v2-baseline"
+        if not baseline.exists():
+            # A fresh clone has no previous v2 experiment to preserve.
+            return
+        manifest = json.loads((baseline / "manifest.json").read_text())
+        for name, digest in manifest["sha256"].items():
+            self.assertEqual(hashlib.sha256((baseline / name).read_bytes()).hexdigest(), digest)
+
+    def test_predictor_ignores_scenario_labels_and_frozen_guard(self):
+        batch = [r for r in self.rows if r["split"] == "validation"][:4]
+        history = [r for r in self.rows if r["split"] == "train"]
+        changed = [{**r, "scenario": "N1", "true_label": 1 - r["true_label"]} for r in batch]
+        X = self.model.features.transform(batch, history)
+        np.testing.assert_array_equal(X, self.model.features.transform(changed, history))
+        before = deepcopy(self.model.thresholds)
+        scores = self.model.scores(X)
+        guard = self.model.operational_guard(X)
+        expected = np.where(guard, .5 + .5 * scores["hybrid_unguarded"], .49 * scores["hybrid_unguarded"])
+        np.testing.assert_array_equal(scores["hybrid"], expected)
+        self.assertEqual(before, self.model.thresholds)
+        self.assertEqual(self.model.metadata["operational_guard"]["fit_split"], "genuine train")
+        self.assertEqual(self.model.metadata["fusion_selection"]["selection_split"], "validation")
+        for candidate in self.model.metadata["fusion_selection"]["candidates"]:
+            self.assertLessEqual(candidate["false_positive_rate"], .025)
+            self.assertTrue(all(rate <= .05 for rate in candidate["slice_false_positive_rates"]))
+
+    def test_heldout_values_cannot_change_fit_or_selection(self):
+        # Regression only: same frozen hyperparameters, no test evaluation and
+        # no artifact write. Poison every held-out label/text/agent value.
+        poisoned = [{**r, "true_label": 1 - r["true_label"],
+                     "body": f"heldoutpoisonword unique {r['id']}",
+                     "user_agent": "heldoutpoisonagent"} if r["split"] == "test" else r
+                    for r in self.rows]
+        fitted = TrustRateModel(self.model.qubits, self.model.n_train, self.model.seed).fit(
+            poisoned, self.model.metadata["provenance"])
+        self.assertEqual(fitted.model_version, self.model.model_version)
+        self.assertEqual(fitted.thresholds, self.model.thresholds)
+        self.assertEqual(fitted.metadata["fusion_selection"], self.model.metadata["fusion_selection"])
+        np.testing.assert_array_equal(fitted.quantum_train, self.model.quantum_train)
+        self.assertNotIn("heldoutpoisonword", fitted.features.vectorizer.vocabulary_)
 
     def test_score_batch_and_load_new_review(self):
         batch = self.rows[-5:]

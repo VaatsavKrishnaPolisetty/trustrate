@@ -7,12 +7,14 @@ Secrets are read only from the ignored local config and never printed.
 import os
 import re
 import secrets
+import subprocess
 import time
 import unittest
 import requests
 
 from service.app.main import connect, snapshot, API_KEY, LOCAL, MODEL_PATH
 from pipeline.models import TrustRateModel
+from pathlib import Path
 
 WEB = "http://127.0.0.1:8080"
 API = "http://127.0.0.1:8001"
@@ -30,6 +32,22 @@ def csrf(session, path="/index.php"):
 
 @unittest.skipUnless(os.getenv("TRUSTRATE_LIVE")=="1", "Requires local servers and real model")
 class RealServiceTests(unittest.TestCase):
+    def test_asynchronous_local_batch_receipt(self):
+        headers={"X-API-Key":API_KEY}
+        rid=rows("SELECT id FROM reviews WHERE source_id LIKE 'v3-%' ORDER BY id LIMIT 1")[0]["id"]
+        response=requests.post(API+"/v1/score/batch",headers=headers,json={"review_ids":[rid],"mode":"aer_noise","async":True},timeout=20)
+        self.assertEqual(response.status_code,202)
+        job=response.json()["job_id"]
+        for _ in range(60):
+            result=requests.get(API+"/v1/jobs/"+job,headers=headers,timeout=10).json()
+            if result["status"] not in ("queued","running"): break
+            time.sleep(1)
+        self.assertEqual(result["status"],"completed")
+        self.assertTrue(result["results"][0]["backend"].startswith("aer_noise_ibm_"))
+        self.assertTrue(result["results"][0]["experimental"])
+        self.assertIsNone(result["results"][0]["ibm_job_id"])
+        self.assertEqual(requests.get(API+"/v1/jobs/"+job,timeout=10).status_code,401)
+
     def test_auth_errors_and_saved_model_inference(self):
         self.assertEqual(requests.get(API+"/health",timeout=10).json()["status"],"ready")
         self.assertEqual(requests.post(API+"/v1/score",json={"review_id":1},timeout=10).status_code,401)
@@ -38,7 +56,7 @@ class RealServiceTests(unittest.TestCase):
         self.assertEqual(requests.post(API+"/v1/score",json={"review_id":999999999},headers=headers,timeout=10).status_code,404)
         # No unauthenticated memory-review route or fake hardware queue remains.
         self.assertEqual(requests.post(API+"/v1/quantum/hardware-run",timeout=10).status_code,404)
-        ids=[r["id"] for r in rows("SELECT id FROM reviews WHERE source_id IS NOT NULL AND status<>'deleted' ORDER BY id LIMIT 2")]
+        ids=[r["id"] for r in rows("SELECT id FROM reviews WHERE source_id LIKE 'v3-%' AND status<>'deleted' ORDER BY id LIMIT 2")]
         batch=requests.post(API+"/v1/score/batch",json={"review_ids":ids},headers=headers,timeout=90)
         self.assertEqual(batch.status_code,200)
         model=TrustRateModel.load(MODEL_PATH)
@@ -54,6 +72,13 @@ class RealServiceTests(unittest.TestCase):
     def test_submit_persist_score_moderate_edit_delete(self):
         owner=requests.Session(); admin=requests.Session()
         tag=secrets.token_hex(8); password=secrets.token_urlsafe(24)
+        fixture_admin=f"live-admin-{tag}@example.invalid"
+        env={**os.environ,**{k:v for k,v in LOCAL.items() if v is not None},"FIXTURE_ADMIN":fixture_admin}
+        def fixture_sql(code):
+            run=subprocess.run(["php","-r",'require "web/bootstrap.php"; '+code],cwd=Path(__file__).resolve().parents[1],env=env,capture_output=True)
+            self.assertEqual(run.returncode,0,"PHP fixture setup/cleanup failed")
+        fixture_sql('query("INSERT INTO users(email,name,password_hash,role) SELECT ?,?,password_hash,\'admin\' FROM users WHERE email=?",[getenv("FIXTURE_ADMIN"),"Live test administrator",getenv("ADMIN_EMAIL")]);')
+        self.addCleanup(fixture_sql,'query("UPDATE users SET role=\'user\' WHERE email=?",[getenv("FIXTURE_ADMIN")]);')
         response=owner.post(WEB+"/index.php",data={"csrf":csrf(owner),"action":"register","name":"Integration test", "email":f"live-{tag}@example.invalid","password":password},timeout=20)
         self.assertEqual(response.status_code,200)
         self.assertIn("Share your experience",response.text)
@@ -72,9 +97,9 @@ class RealServiceTests(unittest.TestCase):
                 time.sleep(1)
             self.assertTrue(result,"Real PHP worker did not persist a score within 180s")
             self.assertEqual(result[0]["backend"],"aer_simulator")
-            self.assertTrue(result[0]["model_version"].startswith("trustrate-uci-v2-"))
+            self.assertTrue(result[0]["model_version"].startswith("trustrate-uci-v3-"))
             self.assertNotEqual(rows("SELECT status FROM reviews WHERE id=%s",(rid,))[0]["status"],"pending_score")
-            self.assertEqual(admin.post(WEB+"/index.php",data={"csrf":csrf(admin),"action":"login","email":LOCAL["ADMIN_EMAIL"],"password":LOCAL["ADMIN_PASSWORD"]},timeout=20).status_code,200)
+            self.assertEqual(admin.post(WEB+"/index.php",data={"csrf":csrf(admin),"action":"login","email":fixture_admin,"password":LOCAL["ADMIN_PASSWORD"]},timeout=20).status_code,200)
             for action,state in [("remove","removed"),("restore","restored")]:
                 rev=rows("SELECT revision FROM reviews WHERE id=%s",(rid,))[0]["revision"]
                 response=admin.post(WEB+"/admin.php",data={"csrf":csrf(admin,"/admin.php"),"action":action,"review_id":rid,"revision":rev,"reason":"Automated real-service integration verification"},timeout=20)
@@ -86,6 +111,18 @@ class RealServiceTests(unittest.TestCase):
             evidence=admin.get(WEB+"/models.php",timeout=20)
             self.assertIn("Detection benchmark",evidence.text)
             self.assertIn("IBM QUANTUM",evidence.text)
+            rejected=admin.post(WEB+"/models.php",data={"review_ids":rid,"mode":"aer_noise"},timeout=20)
+            self.assertEqual(rejected.status_code,403)
+            experiment=admin.post(WEB+"/models.php",data={"csrf":csrf(admin,"/models.php"),"review_ids":rid,"mode":"aer_noise"},timeout=20)
+            self.assertEqual(experiment.status_code,200)
+            self.assertIn("?job=job_",experiment.url)
+            job_id=experiment.url.split("?job=")[-1]
+            for _ in range(60):
+                receipt=requests.get(API+"/v1/jobs/"+job_id,headers={"X-API-Key":API_KEY},timeout=10).json()
+                if receipt["status"] not in ("queued","running"): break
+                time.sleep(1)
+            self.assertEqual(receipt["status"],"completed")
+            self.assertIsNone(receipt["results"][0]["ibm_job_id"])
             rev=rows("SELECT revision FROM reviews WHERE id=%s",(rid,))[0]["revision"]
             response=owner.post(WEB+"/index.php",data={"csrf":csrf(owner),"action":"edit","review_id":rid,"revision":rev,**content,"body":content["body"]+" Updated after another week."},timeout=20)
             self.assertEqual(response.status_code,200)

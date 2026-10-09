@@ -1,37 +1,41 @@
-# TrustRate: real application walkthrough
+# Five-minute presentation
 
-1. Open http://127.0.0.1:8080/index.php. Use a populated dataset product.
-   Explain that public UCI review text is real, but products and cyber metadata
-   are synthetic. Raw/Genuine values come from MySQL, not fixed UI constants.
-2. Sign in using `ADMIN_EMAIL` / `ADMIN_PASSWORD` from the local-only
-   `db/.local/compose.env` file. Do not project this credentials file on screen.
-3. Open Moderation. Filter `flagged`; open an evidence link. Show actual
-   classical/quantum/hybrid bars and feature reason values.
-4. Remove or restore a review with an audit reason. Refresh the product page;
-   ratings reflect the persistent status. Review the audit trail.
-5. In Synthetic attack laboratory, select A1 and a populated product. Injection
-   inserts 12 synthetic reviews into MySQL with pending status. The real PHP
-   worker calls FastAPI/Aer, saves scores and flags only model-selected rows.
-   **Do not promise every attack is detected.** Refresh the queue to inspect.
-6. Submit your own review. Edit it; the old score is invalidated and revision
-   increments. The worker rescoring uses the same trained model as seeded rows.
-7. Open Models. Show the measured held-out table, ROC/PR curves, NAT failure
-   rate, feature map and `FidelityQuantumKernel` configuration.
-8. Show the completed actual IBM kernel experiment:
-   - Backend `ibm_marrakesh`
-   - Job `db4ia6qmb58s73898ebg`
-   - 153 fidelity circuits / 256 shots / four qubits
-   - 12 genuine training points and six stratified demonstration points
-   - Recorded hardware-vs-Aer kernel MAE, approximately 0.014715
-9. State the limitations: quantum underperforms classical here; hybrid test FPR
-   exceeds the validation target, shared-NAT false positives remain unacceptable,
-   and low-and-slow detection is weak. This is a real functioning research
-   pipeline, not a production-ready fraud detector or quantum-advantage result.
+Open **http://127.0.0.1:8080/index.php**. Do not use the old static server on 4173.
+Sign in with ADMIN_EMAIL/ADMIN_PASSWORD from local `db/.local/compose.env`;
+do not project this credentials file. Nothing else needs to be installed now.
 
-No new hardware submission is required for the walkthrough. Saved genuine
-hardware results remain visible if IBM is temporarily unreachable. This is
-cached evidence, not a new offline hardware execution.
+1. **Product (45 seconds).** Explain public UCI review text plus synthetic product/
+   behavioral metadata. Raw and Genuine ratings are live database aggregates.
+2. **Attack (60 seconds).** Moderation → choose a populated product → A1 → give
+   an audit reason → inject. Forty reviews enter the real scoring queue. Refresh
+   and filter flagged reviews; never promise every injected review is detected.
+3. **Evidence (45 seconds).** Open a review: real classical/quantum/operational
+   score bars, feature reasons, related IP/subnet/text/time leads. Restore or
+   remove with an audit reason; refresh the product to show persistent changes.
+4. **Qiskit (90 seconds).** Models → measured benchmark and circuit. Show
+   `FidelityQuantumKernel`, genuine training, calibration, and the distinct guard.
+   State that classical OCSVM is currently stronger; no quantum advantage claim.
+   Show IBM receipt `db4ia6qmb58s73898ebg` on `ibm_marrakesh`: real 153-circuit
+   kernel workload. It belongs to v2, not the active v3 model.
+5. **Limits and reset (40 seconds).** Show v3's held-out NAT/launch traps (0/24
+   false positives each) and low-and-slow failure (0/16 caught). Select the same
+   product in demo reset, supply reason/confirmation, reset. Only button-injected
+   rows are removed; public imports, ordinary reviews and audits remain.
 
-There is no reset-to-baseline button or backup video yet. Repeated attacks add
-new persistent reviews and audit records; use moderation rather than pretending
-they disappear at application restart.
+Optional: Models → asynchronous experiment → enter a review ID → **Local noisy
+Aer**. Poll the same receipt; this uses cached device noise and no new IBM quota.
+IBM modes are optional and spend quota. Do not submit hardware merely to show
+the existing verified result; avoid relying on queue time during the presentation.
+
+**Network/API backup:** open `docs/backup.html`. This is an honest static evidence
+snapshot, not a video or a claim of live offline hardware execution. Refresh it
+after rebuilding with `.venv/bin/python -m pipeline.export_evidence`.
+
+**If the app was closed:**
+```bash
+cd /Users/vaatsavkrishna/omnirush.ai/trustrate
+php db/native.php start
+.venv/bin/python -m service.local start
+```
+Skip native start if the dedicated database is already running. No reimport or
+new IBM key is required. Inspect `.runtime/` logs locally if startup fails.

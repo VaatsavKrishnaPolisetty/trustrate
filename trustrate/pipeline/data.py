@@ -84,9 +84,9 @@ def make_dataset(sources, seed=42):
     start = 1704067200.0
     for split_index, (split, count) in enumerate(zip(("train", "validation", "test"), (1080, 360, 360))):
         local = pool[cuts[split_index]:cuts[split_index + 1]]
-        if len(local) < 20:
+        if len(local) < 60:
             raise ValueError("Not enough independent source groups")
-        genuine_sources, attack_sources = local[:-12], local[-12:]
+        genuine_sources, attack_sources = local[:-40], local[-40:]
         duration = count * 1200
         serial = 0
 
@@ -96,7 +96,7 @@ def make_dataset(sources, seed=42):
             user = f"{split}-user-{serial}"
             ip = f"{split}-network-{rng.randrange(100)}"
             row = dict(
-                id=f"{split}-{serial:05d}", product_id=f"product-{rng.randrange(8)}",
+                id=f"v3-{split}-{serial:05d}", product_id=f"product-{rng.randrange(8)}",
                 user_id=user, ip_hash=hashlib.sha256(ip.encode()).hexdigest(),
                 ip_prefix=f"synthetic:{split}:{rng.randrange(20)}",
                 user_agent=rng.choice(["Chrome/120", "Chrome/120", "Safari/17", "Firefox/121"]),
@@ -105,7 +105,7 @@ def make_dataset(sources, seed=42):
                 body=source["body"], revision=1, scenario=scenario, true_label=label,
                 split=split, source_group=source["source_group"], source_row=source["source_row"],
                 source_sentiment=source["sentiment"], template_group=None,
-                metadata_origin="synthetic", text_origin="UCI-331-Amazon",
+                metadata_origin="synthetic", text_origin="UCI-331-Amazon", dataset_methodology="v3",
             )
             row.update(overrides)
             rows.append(row)
@@ -125,21 +125,22 @@ def make_dataset(sources, seed=42):
                     start + duration * fraction + i * 30, scenario=trap, **overrides)
         for a, fraction in enumerate((.15, .4, .6, .85), 1):
             scenario = f"A{a}"
-            for i in range(16):
-                t = start + duration * fraction + i * (900 if a == 3 else 4)
-                override = {"product_id": f"product-{a}", "rating": 1 if a == 3 else 5,
+            for i in range(40 if a == 1 else 16):
+                t = start + duration * fraction + i * (86400 if a == 3 else 25)
+                override = {"product_id": f"product-{a}", "rating": 1 if a in (2, 3) else 5,
                             "template_group": f"{split}-campaign-{a}"}
-                source = attack_sources[(a - 1) * 3 + (i % 3 if a != 1 else 0)]
-                if a == 1:  # new-account, one-IP exact-copy burst
-                    override.update(ip_hash=text_group(f"{split}-attack-ip"), account_created=t - 60)
-                elif a == 2:  # distributed new accounts, coordinated target
-                    override.update(account_created=t - 3600, user_agent="SyntheticAutomation/1")
-                elif a == 3:  # aged-account slower negative campaign
+                source = attack_sources[6 + i if a == 3 else (a - 1) * 3 + i % 3]
+                if a == 1:  # 40 copied reviews, five IPs, inside 20 minutes
+                    override.update(ip_hash=text_group(f"{split}-attack-ip-{i % 5}"), account_created=t - 60)
+                elif a == 2:  # one-star bombing burst from three IPs
+                    override.update(ip_hash=text_group(f"{split}-bomb-ip-{i % 3}"), account_created=t - 3600)
+                elif a == 3:  # unique public texts, aged accounts, day-scale low-and-slow
                     override.update(account_created=t - 500 * 86400)
-                else:  # one account submitting a rapid repeated-text stream
-                    override.update(user_id=f"{split}-repeat-account", account_created=t - 30 * 86400)
+                else:  # many new accounts on one subnet, each submits once
+                    override.update(ip_hash=text_group(f"{split}-subnet-ip-{i}"),
+                                    ip_prefix=f"synthetic:{split}:campaign-subnet", account_created=t - 60)
                 add(source, t, scenario=scenario, label=1, **override)
-        start += duration + 2 * 86400
+        start = max(r["created_at"] for r in rows) + 2 * 86400
     rows.sort(key=lambda r: (r["created_at"], r["id"]))
     assert_split_integrity(rows)
     return rows

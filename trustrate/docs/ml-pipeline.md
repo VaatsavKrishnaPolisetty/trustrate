@@ -1,5 +1,11 @@
 # TrustRate ML/data pipeline
 
+> **Historical v2 methodology below.** The current v3 release uses 32 quantum
+> training rows, corrected attack definitions, full-feature classical OCSVM and
+> a separate operational guard. See [RELEASE.md](RELEASE.md) for current numbers
+> and differences. Retain this page as the v2 experiment record, not the live
+> model configuration. Current rebuild: `python -m pipeline.cli build --qubits 4 --n-train 32`.
+
 ## Run the complete experiment
 
 From the `trustrate` directory, using the pinned Python environment:

@@ -37,7 +37,10 @@ services:
       DB_READONLY_PASSWORD: ${DB_READONLY_PASSWORD:?Run setup}
       SCORING_API_KEY: ${SCORING_API_KEY:?Run setup}
       MODEL_ARTIFACT_DIR: /app/service/artifacts
-    volumes: ["./service/artifacts:/app/service/artifacts:ro"]
+      IBM_QUANTUM_TOKEN: ${IBM_QUANTUM_TOKEN:-}
+      IBM_INSTANCE: ${IBM_INSTANCE:-}
+      IBM_BACKEND_NAME: ${IBM_BACKEND_NAME:-}
+    volumes: ["./service/artifacts:/app/service/artifacts:ro", "job_data:/app/.runtime/jobs"]
     expose: ["8000"]
     depends_on:
       init: {condition: service_completed_successfully}
@@ -56,7 +59,7 @@ services:
       COOKIE_SECURE: ${COOKIE_SECURE:-0}
       DEMO_MODE: ${DEMO_MODE:-0}
       MODEL_ARTIFACT_DIR: /var/www/service/artifacts
-    volumes: ["./service/artifacts:/var/www/service/artifacts:ro", "./data:/var/www/data:ro"]
+    volumes: ["./service/artifacts:/var/www/service/artifacts:ro", "./data:/var/www/data:ro", "job_data:/var/www/.runtime/jobs:ro"]
     ports: ["127.0.0.1:4173:80"]
     depends_on:
       init: {condition: service_completed_successfully}
@@ -72,3 +75,4 @@ services:
       api: {condition: service_started}
 volumes:
   mysql_data:
+  job_data:

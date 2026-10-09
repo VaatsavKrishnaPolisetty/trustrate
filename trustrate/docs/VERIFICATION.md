@@ -1,5 +1,8 @@
 # Verification and remaining acceptance work
 
+**Historical v2 report.** Preserved unchanged results; the current release and
+changed v3 dataset methodology are documented in [RELEASE.md](RELEASE.md).
+
 Recorded 2026-10-09. Model `trustrate-uci-v2-9eceba0ec859`.
 
 ## Real data / leakage controls

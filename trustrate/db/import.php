@@ -2,6 +2,7 @@
 declare(strict_types=1);
 if(PHP_SAPI!=='cli') exit;
 require_once __DIR__.'/../web/bootstrap.php';
+require_once __DIR__.'/demo.php';
 $options=[];
 for($i=1;$i<count($argv);$i++) {
     if(preg_match('/^--(file|split)=(.+)$/D',$argv[$i],$m)) $options[$m[1]]=$m[2];
@@ -15,6 +16,7 @@ function importDate(mixed $value): string {
     return (new DateTimeImmutable($value,new DateTimeZone('UTC')))->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:s');
 }
 try {
+    refreshDemoProductNames();
     $file=fopen($path,'r'); if(!$file) throw new RuntimeException('Dataset is unavailable.');
     $count=0; $skipped=0; $lineNo=0; $disabledPassword=password_hash(bin2hex(random_bytes(32)),PASSWORD_DEFAULT);
     while(($line=fgets($file))!==false) {
@@ -39,7 +41,8 @@ try {
         query("INSERT INTO users(email,name,password_hash,created_at) VALUES (?,?,?,?) ON DUPLICATE KEY UPDATE created_at=LEAST(created_at,VALUES(created_at))",[$email,'Synthetic '.substr($uid,0,70),$disabledPassword,$account]);
         $user=(int)query('SELECT id FROM users WHERE email=?',[$email])->fetchColumn();
         $slug='dataset-'.substr(hash('sha256',$pid),0,32);
-        query('INSERT IGNORE INTO products(slug,name,description) VALUES (?,?,?)',[$slug,substr((string)($r['product_name']??('Dataset product '.$pid)),0,200),'Synthetic demonstration dataset; reviews are not real customer experiences.']);
+        $sample=preg_match('/^product-([0-7])$/D',$pid,$m)?demoProductNames()[(int)$m[1]]:($r['product_name']??('Research sample '.$pid));
+        query('INSERT IGNORE INTO products(slug,name,description) VALUES (?,?,?)',[$slug,substr((string)$sample,0,200),'Illustrative product. UCI research text is reused with simulated accounts and activity; it is not a review of this product or a verified purchase.']);
         $product=(int)query('SELECT id FROM products WHERE slug=?',[$slug])->fetchColumn();
         query('INSERT INTO reviews(product_id,user_id,rating,title,body,ip_hash,ip_prefix,user_agent,revision,created_at,status,is_synthetic,true_label,scenario,split,source_id) VALUES (?,?,?,?,?,?,?,?,?,?,\'pending_score\',1,?,?,?,?)',[$product,$user,$rating,$title,$body,$hash,$prefix,substr((string)($r['user_agent']??''),0,512),max(1,(int)($r['revision']??1)),$created,isset($r['true_label'])?substr((string)$r['true_label'],0,40):null,isset($r['scenario'])?substr((string)$r['scenario'],0,80):null,isset($r['split'])?substr((string)$r['split'],0,20):null,$source]);
         enqueue((int)db()->lastInsertId(),max(1,(int)($r['revision']??1))); db()->commit(); $count++;

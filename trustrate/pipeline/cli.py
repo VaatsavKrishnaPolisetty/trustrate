@@ -1,11 +1,33 @@
 """Download/build/train/evaluate commands. Evaluation never trains or saves a model."""
 import argparse
 import json
+import hashlib
+import shutil
 from pathlib import Path
 
 from .data import download_public, load_reviews, make_dataset, write_jsonl
 from .models import TrustRateModel
 from .validation import evaluate_model
+
+
+def preserve_v2_baseline(artifact, reviews):
+    """Snapshot original evidence before regeneration, never overwrite a baseline."""
+    root = Path(artifact).parent
+    destination = root / "v2-baseline"
+    if destination.exists():
+        return
+    if not Path(artifact).exists():
+        return
+    old = TrustRateModel.load(artifact)
+    if "-v2-" not in old.model_version:
+        return
+    destination.mkdir()
+    manifest = {}
+    for source in [p for p in root.iterdir() if p.is_file()] + [Path(reviews), Path(reviews).parent / "provenance.json"]:
+        if source.exists():
+            shutil.copy2(source, destination / source.name)
+            manifest[source.name] = hashlib.sha256(source.read_bytes()).hexdigest()
+    (destination / "manifest.json").write_text(json.dumps({"model_version": old.model_version, "sha256": manifest}, indent=2) + "\n")
 
 
 def main():
@@ -21,9 +43,14 @@ def main():
         p.add_argument("--n-train", type=int, default=24)
     args = parser.parse_args()
     provenance_path = Path(args.input).parent / "provenance.json"
+    if args.command in ("data", "build", "train"):
+        preserve_v2_baseline(args.artifact, args.input)
     if args.command in ("data", "build"):
         sources, provenance = download_public(Path(args.input).parent)
         rows = make_dataset(sources, args.seed)
+        provenance["dataset_methodology"] = "v3: corrected A1 five-IP 40-review/20-minute burst; A2 one-star few-IP bombing; A3 unique public text day-scale campaign; A4 many new accounts once on shared subnet. Synthetic fraud labels. v2 metrics not directly comparable."
+        provenance["dataset_namespace"] = "v3-{split}-{serial}"
+        provenance_path.write_text(json.dumps(provenance, indent=2) + "\n")
         write_jsonl(rows, args.input)
         print(f"Generated {len(rows)} rows from 1000 real Amazon sentences; synthetic behavior labels", flush=True)
         if args.command == "data":

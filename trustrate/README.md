@@ -4,10 +4,11 @@ A PHP/MySQL review application with a read-only FastAPI model service, real
 Isolation Forest / classical OCSVM / Qiskit fidelity-kernel OCSVM inference,
 validation-calibrated fusion, and an independently recorded IBM hardware experiment.
 
-**Status:** the local end-to-end flow works and has integration tests. This is
-research software, not a production fraud detector. The shared-NAT false-positive
-trap and low-and-slow attack acceptance criteria are **not met**. Do not call a
-flag proof of fraud, claim quantum advantage, or deploy this to real shoppers yet.
+**Status:** the local end-to-end release works, including safe demo reset and
+asynchronous backend experiments. This is research software, not a production
+fraud detector. v3's guarded held-out result detects 29/40 bot-ring reviews with
+0/24 false positives in each benign trap; low-and-slow attacks remain missed.
+No quantum advantage is demonstrated. See [current release evidence](docs/RELEASE.md).
 
 ## Open the running app on this Mac
 
@@ -31,10 +32,11 @@ Run commands from this README's folder (`trustrate/` inside the current reposito
 ```bash
 python3.11 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-.venv/bin/python -m pipeline.cli build --qubits 4 --n-train 24
+.venv/bin/python -m pipeline.cli build --qubits 4 --n-train 32
 php db/native.php start
 php db/run.php init
 php db/run.php import
+php db/run.php activate-dataset
 .venv/bin/python -m service.local start
 SCORING_URL=http://127.0.0.1:8001 php db/run.php backfill
 ```
@@ -60,18 +62,23 @@ Stopping retains database contents. Restart with `native.php start` and
 - Actual public text: UCI **Sentiment Labelled Sentences**, Amazon subset,
   [CC BY 4.0](https://archive.ics.uci.edu/dataset/331/sentiment+labelled+sentences).
 - 1,000 source sentences, explicitly reused within—but not across—split groups.
-- Generated dataset: **2,136 reviews**, **1,944 genuine-behavior**, **192 attacks**.
+- Generated v3 dataset: **2,208 reviews**, **1,944 genuine-behavior**, **264 attacks**.
 - Products, accounts, ratings, timestamps, networks and fraud ground truth are
   synthetic. Sentiment is **not** a fraud label; public authors are not accused.
 - Ten causal features use only strictly earlier events; vocabulary/statistics,
   scalers and PCA fit genuine training only. Evaluation loads the saved model
   without retraining or recalibrating on the test split.
-- IF uses all genuine training points. Classical OCSVM and quantum OCSVM share
-  24 training points and PCA/angle input. Live scoring evaluates the actual Aer
+- IF and classical OCSVM use all genuine training points and full features.
+  Quantum OCSVM uses 32 genuine points and PCA/angle input. These are different
+  information/training budgets, not an isolated kernel-only comparison.
+  Live scoring evaluates the actual Aer
   fidelity kernel against support vectors, not a weighted fake “quantum score”.
-- Validation-only fusion selected **90% classical ensemble / 10% quantum**.
+- Validation-only selection chose **50% classical ensemble / 50% quantum** before
+  an explicit, separate two-signal operational guard. The guard determines alert
+  eligibility at the current threshold; quantum affects ranking only. Both guarded
+  and unguarded results appear in the Models page, without an advantage claim.
 
-See [methodology](docs/ml-pipeline.md) and [measured evidence](docs/VERIFICATION.md).
+See [current release](docs/RELEASE.md) and [historical v2 evidence](docs/VERIFICATION.md).
 Artifacts and downloaded data are ignored; regenerate them with the build command.
 Four qubits are the live default; six-qubit training is supported and smoke-tested.
 
@@ -100,8 +107,15 @@ restore `ibm_quantum` or `auth.quantum.ibm.com`; that old endpoint is retired.
 .venv/bin/python -m pipeline.hardware_demo collect
 ```
 
-Hardware and Aer results remain separate. Live customer requests use Aer; hardware
-is not synchronous serving and no automatic fallback is claimed. An ambiguous
+The receipt above belongs to v2, not the latest v3 model; its immutable artifacts
+are preserved. Hardware and Aer results remain separate. Live customer requests
+use Aer. Admins can now launch an explicit asynchronous experiment from Models
+or POST `/v1/score/batch` with `async=true`, 1–4 IDs and `mode=ibm`, `aer_noise`, or
+`ibm_with_fallback`. Poll GET `/v1/jobs/{job_id}` with the server API key.
+Fallback uses a cached device noise model when available; otherwise it explicitly
+labels ideal Aer. It never calls a simulator result IBM hardware. Backend
+experiments retain Aer calibration and do not overwrite live moderation scores.
+An ambiguous
 submission is inspected in IBM Workloads before any retry. The six-row experiment
 is not statistically comparable to the full 472-row software benchmark.
 
@@ -130,6 +144,8 @@ complete production security certification or a retention/privacy compliance pol
 ```bash
 .venv/bin/python -m unittest discover -s tests -p test_ml.py -v
 .venv/bin/python -m unittest discover -s tests -p test_hardware.py -v
+.venv/bin/python -m unittest discover -s tests -p test_jobs.py -v
+TRUSTRATE_TEST_DEMO=1 .venv/bin/python -m unittest discover -s tests -p test_demo.py -v
 # Stop the live worker to isolate fixture-based race tests:
 .venv/bin/python -m service.local stop
 TRUSTRATE_START_WEB=1 .venv/bin/python -m unittest discover -s tests -p test_web.py -v
@@ -156,14 +172,21 @@ docker compose --env-file db/.local/compose.env exec web php /var/www/db/backfil
 Compose serves PHP on 4173 and keeps MySQL/FastAPI off host public ports. It mounts
 model artifacts read-only. `.dockerignore` excludes private keys/config/data/venv.
 
-## Remaining acceptance gaps
+## Demo controls and remaining limits
 
-- NAT false positives and low-and-slow misses require further **validation-only**
-  model development; do not tune repeatedly against the reported test results.
-- A2/A4 fixture mechanisms currently differ from the PRD's precise review-bombing
-  and account-farm definitions (documented); no claim of exact parity.
-- IBM hardware runs through a CLI job receipt, not a web-triggered batch jobs API.
-- No automatic IBM→noise-model fallback, full text-cluster graph, reset-to-baseline
-  control, backup video, or production deployment verification yet.
-- Related-review metadata leads and tokenized text analysis are not causal model
-  explanations. Performance beyond the small development dataset is unmeasured.
+Moderation's demo laboratory supports A1–A4 and N1/N2. Reset affects only the
+selected product's button-injected reviews with matching injection audit records.
+It preserves imported data, ordinary reviews, original scores and audit history.
+The old v2 imported rows are archived with retained scores, not silently deleted.
+
+`python -m pipeline.export_evidence` produces **`docs/backup.html`**, a self-contained
+offline evidence page. It is not a recorded video. No backup video is claimed.
+
+Low-and-slow attacks and many account-farm reviews are still missed. Classical
+OCSVM outperforms the guarded hybrid. v3's revised scenario data is not directly
+comparable with v2. Hardware is a completed v2 experiment; v3 has no new hardware
+benchmark. Experimental IBM batch routes are implemented but have not been
+exercised with another quota-consuming submission; noise and forced-failure
+fallback paths have actual tests. Docker/production deployment and physical-device
+visual/accessibility checks remain unverified. Related metadata is not causal
+proof of fraud, and no automatic removal should be enabled for real customers.
