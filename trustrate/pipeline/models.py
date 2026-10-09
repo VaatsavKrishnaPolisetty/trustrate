@@ -7,7 +7,10 @@ from sklearn.preprocessing import StandardScaler
 
 class TrustRateModel:
     def __init__(self, quantum=False, seed=42): self.quantum=quantum; self.seed=seed
-    def fit(self,X):
+    def fit(self,X,labels=None):
+        if labels is not None:
+            normal=np.asarray(labels)==0
+            X=np.asarray(X)[normal]
         self.scaler=StandardScaler().fit(X); Z=self.scaler.transform(X); self.classical=IsolationForest(n_estimators=150,random_state=self.seed,contamination='auto').fit(Z); self.ocsvm=OneClassSVM(kernel='rbf',gamma='scale',nu=.12).fit(Z); self.backend='classical';
         if self.quantum:
             from .quantum import fit_quantum

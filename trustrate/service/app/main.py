@@ -13,6 +13,11 @@ try:
     import pymysql
 except ImportError:
     pymysql = None
+try:
+    from pipeline.features import extract_features
+    from pipeline.models import TrustRateModel
+except ImportError:
+    extract_features = TrustRateModel = None
 
 app = FastAPI(title="TrustRate Quantum Trust API", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -22,6 +27,11 @@ random.seed(42)
 PRODUCT = {"id": 1, "name": "AeroSound Pro Wireless Headphones", "category": "Audio", "raw": 4.31}
 reviews = []
 jobs = {}
+MODEL_ARTIFACT = os.getenv("MODEL_ARTIFACT", "service/artifacts/trustrate-model.joblib")
+trained_model = None
+if TrustRateModel and os.path.exists(MODEL_ARTIFACT):
+    try: trained_model = TrustRateModel.load(MODEL_ARTIFACT)
+    except Exception: trained_model = None
 
 def seed_reviews():
     phrases = ["Clear sound and comfortable fit.", "Battery lasts all day and the case is tiny.", "Great value, would recommend.", "The noise cancelling is impressive."]
@@ -71,12 +81,24 @@ def database_review(review_id):
         return row
     finally: conn.close()
 
+def database_reviews(product_id=1):
+    conn=db_connection()
+    if not conn: return []
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT r.id,r.product_id,r.user_id,r.rating,r.title,r.body,r.ip_hash,r.created_at,r.revision,u.created_at AS account_created FROM reviews r JOIN users u ON u.id=r.user_id WHERE r.product_id=%s AND r.status<>'deleted' ORDER BY r.created_at,r.id",(product_id,))
+            rows=cur.fetchall()
+        for row in rows:
+            row["ip"]=row.pop("ip_hash"); row["ua"]="unknown"; row["user"]=str(row["user_id"]); row["status"]="published"; row["timestamp"]=row["created_at"].timestamp() if hasattr(row["created_at"],"timestamp") else 0
+        return rows
+    finally: conn.close()
+
 class ReviewIn(BaseModel):
     rating: int = Field(ge=1, le=5)
     body: str = Field(min_length=10, max_length=1000)
 
 @app.get("/health")
-def health(): return {"status":"ok", "model_loaded":True, "active_backend":"aer_simulator", "qiskit_ready":True}
+def health(): return {"status":"ok", "model_loaded":bool(trained_model), "active_backend":"aer_simulator", "qiskit_ready":True, "database":"configured" if db_connection() else "offline-demo"}
 
 @app.get("/v1/product")
 def product():
@@ -92,7 +114,18 @@ def score_review(payload: dict, x_api_key: Optional[str]=Header(default=None)):
     review_id=int(payload.get("review_id",0)); r=database_review(review_id)
     if r is None: r=next((x for x in reviews if x["id"]==review_id),None)
     if r is None: raise HTTPException(404,"Review not found")
-    result=score(r); result.update({"review_id":review_id,"review_revision":int(r.get("revision",payload.get("review_revision",1)))})
+    result=score(r)
+    history=database_reviews(int(r.get("product_id",1)))
+    if trained_model and history and extract_features:
+        try:
+            matrix=np.asarray(extract_features(history),dtype=float)
+            index=next(i for i,x in enumerate(history) if int(x["id"])==review_id)
+            measured=trained_model.scores(matrix[index:index+1])
+            result.update({"classical_score":float(measured["isolation_forest"][0]),"quantum_score":float(measured["quantum_ocsvm"][0]),"hybrid_score":float(measured["hybrid"][0]),"backend":getattr(trained_model,"backend","aer_simulator"),"model_version":"artifact"})
+            result["label"]="suspicious" if result["hybrid_score"]>=.8 else "watch" if result["hybrid_score"]>=.6 else "genuine"
+        except Exception:
+            result["model_warning"]="Persisted artifact unavailable for this review shape; deterministic fallback used"
+    result.update({"review_id":review_id,"review_revision":int(r.get("revision",payload.get("review_revision",1)))})
     return result
 
 @app.get("/v1/admin/summary")

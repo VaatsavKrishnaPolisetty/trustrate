@@ -1,6 +1,6 @@
 """Public-style import and deterministic synthetic review/attack data."""
 from __future__ import annotations
-import csv, json, random
+import csv, json, random, hashlib, urllib.request
 from pathlib import Path
 
 def synthetic_reviews(n_genuine=240, n_attack=80, seed=42):
@@ -22,3 +22,11 @@ def load_reviews(path):
     if p.suffix.lower()=='.csv':
         with p.open(newline='',encoding='utf8') as f: return [{**r,'label':int(r.get('label',0))} for r in csv.DictReader(f)]
     with p.open(encoding='utf8') as f: return [json.loads(x) for x in f if x.strip()]
+
+def import_public(source, output, provenance, license_name="unspecified"):
+    if str(source).startswith(('http://','https://')): urllib.request.urlretrieve(source, output)
+    else:
+        with open(source,'rb') as src, open(output,'wb') as dst: dst.write(src.read())
+    digest=hashlib.sha256(Path(output).read_bytes()).hexdigest()
+    meta={'source':source,'license':license_name,'sha256':digest,'format':Path(output).suffix.lstrip('.')}
+    Path(provenance).write_text(json.dumps(meta,indent=2),encoding='utf8'); return meta
